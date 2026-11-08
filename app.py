@@ -17,6 +17,42 @@ STOCKFISH_PATH = (
     or r"C:\Users\mehdi\Downloads\stockfish-windows-x86-64-universal\stockfish\stockfish-windows-x86-64-universal.exe"
 )
 
+
+def find_stockfish(configured_path=""):
+    candidate_paths = [
+        configured_path,
+        os.getenv("STOCKFISH_PATH", ""),
+        shutil.which("stockfish") or "",
+        shutil.which("stockfish.exe") or "",
+        STOCKFISH_PATH,
+    ]
+
+    for candidate in candidate_paths:
+        if candidate and os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+        if candidate and os.path.isdir(candidate):
+            for root, _, files in os.walk(candidate):
+                for filename in files:
+                    if filename.lower().startswith("stockfish") and filename.lower().endswith(".exe"):
+                        return os.path.join(root, filename)
+
+    search_roots = [
+        os.path.join(os.path.expanduser("~"), "Downloads"),
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Stockfish"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Stockfish"),
+        os.getcwd(),
+    ]
+    for search_root in search_roots:
+        if not os.path.isdir(search_root):
+            continue
+        for root, _, files in os.walk(search_root):
+            for filename in files:
+                if filename.lower().startswith("stockfish") and filename.lower().endswith(".exe"):
+                    return os.path.join(root, filename)
+
+    return None
+
+
 # --- INITIALIZE SESSION STATE ---
 if "board" not in st.session_state:
     st.session_state.board = chess.Board()
@@ -126,9 +162,10 @@ def get_bot_move():
     if not legal_moves:
         return None
 
-    if os.path.isfile(stockfish_path):
+    engine_path = find_stockfish(stockfish_path)
+    if engine_path:
         try:
-            with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
+            with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
                 engine.configure({"Skill Level": bot_config["skill"]})
                 result = engine.play(
                     st.session_state.board,
@@ -142,10 +179,7 @@ def get_bot_move():
         except Exception as exc:
             st.warning(f"Stockfish could not start ({exc}). The bot will use a basic legal-move fallback.")
     else:
-        st.warning(
-            "Stockfish was not found. Set the STOCKFISH_PATH environment variable "
-            "to its executable; using a basic legal-move fallback for now."
-        )
+        st.warning("Stockfish was not found in the configured path, PATH, Downloads, or common install folders.")
 
     return random.choice(legal_moves)
 
@@ -468,29 +502,30 @@ if analyze_clicked or estimate_elo_clicked:
     if not st.session_state.move_history:
         st.warning("No moves have been played yet!")
     else:
-        with st.spinner("Analyzing your moves..."):
-            try:
-                if os.path.isfile(stockfish_path):
-                    try:
-                        with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
-                            st.session_state.analysis_results = analyze_game(engine)
-                    except (chess.engine.EngineError, OSError) as exc:
-                        st.warning(f"Could not start Stockfish ({exc}); using the built-in evaluator.")
-                        st.session_state.analysis_results = analyze_game(None)
-                else:
-                    st.info("Stockfish not found; using the built-in evaluator for this analysis.")
-                    st.session_state.analysis_results = analyze_game(None)
-
-                if estimate_elo_clicked:
-                    st.session_state.estimated_elo = st.session_state.analysis_results["estimated_elo"]
-            except Exception as e:
-                st.error(f"Analysis engine error: {e}")
+        with st.spinner("Searching for Stockfish and analyzing your moves..."):
+            engine_path = find_stockfish(stockfish_path)
+            if engine_path is None:
+                st.error(
+                    "Could not find Stockfish. Install/download Stockfish, then enter the full "
+                    "path to its .exe in the sidebar. Searched the configured path, PATH, "
+                    "Downloads, and common install folders."
+                )
+            else:
+                try:
+                    with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
+                        st.session_state.analysis_results = analyze_game(engine)
+                    st.caption(f"Analysis engine: {engine_path}")
+                    if estimate_elo_clicked:
+                        st.session_state.estimated_elo = st.session_state.analysis_results["estimated_elo"]
+                except (chess.engine.EngineError, OSError) as exc:
+                    st.error(f"Found Stockfish at {engine_path}, but it could not start: {exc}")
+                except Exception as exc:
+                    st.error(f"Analysis engine error: {exc}")
 
 if st.session_state.estimated_elo is not None:
     st.metric("Estimated Elo (rough)", st.session_state.estimated_elo)
     st.caption(
-        "This is a rough estimate, not an official rating. The built-in evaluator is especially "
-        "approximate; an estimate from Stockfish is more useful."
+        "This is a rough estimate, not an official rating."
     )
 
 if st.session_state.analysis_results:
