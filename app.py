@@ -30,6 +30,46 @@ if "selected_square" not in st.session_state:
     st.session_state.selected_square = None
 if "estimated_elo" not in st.session_state:
     st.session_state.estimated_elo = None
+if "games" not in st.session_state:
+    st.session_state.games = [{"moves": st.session_state.move_history}]
+if "active_game_index" not in st.session_state:
+    st.session_state.active_game_index = 0
+if "view_ply" not in st.session_state:
+    st.session_state.view_ply = len(st.session_state.move_history)
+
+
+def board_after_plies(moves, ply_count):
+    replay_board = chess.Board()
+    for _, move in moves[:ply_count]:
+        if move not in replay_board.legal_moves:
+            raise ValueError(f"Cannot replay illegal saved move: {move.uci()}")
+        replay_board.push(move)
+    return replay_board
+
+
+def start_new_game():
+    game_moves = []
+    st.session_state.games.append({"moves": game_moves})
+    st.session_state.active_game_index = len(st.session_state.games) - 1
+    st.session_state.move_history = game_moves
+    st.session_state.board = chess.Board()
+    st.session_state.game_over = False
+    st.session_state.analysis_results = None
+    st.session_state.estimated_elo = None
+    st.session_state.selected_square = None
+    st.session_state.view_ply = 0
+
+
+def load_game(game_index):
+    game = st.session_state.games[game_index]
+    st.session_state.active_game_index = game_index
+    st.session_state.move_history = game["moves"]
+    st.session_state.board = board_after_plies(game["moves"], len(game["moves"]))
+    st.session_state.game_over = st.session_state.board.is_game_over()
+    st.session_state.analysis_results = None
+    st.session_state.estimated_elo = None
+    st.session_state.selected_square = None
+    st.session_state.view_ply = len(game["moves"])
 
 # --- SIDEBAR: CONFIGURATION ---
 st.sidebar.header("Settings")
@@ -44,14 +84,40 @@ difficulty_levels = {
 
 selected_diff = st.sidebar.selectbox("Choose Bot Difficulty:", list(difficulty_levels.keys()))
 bot_config = difficulty_levels[selected_diff]
+stockfish_path = st.sidebar.text_input(
+    "Stockfish executable path",
+    value=STOCKFISH_PATH,
+    help="Optional. Leave unchanged to use the built-in evaluator when Stockfish is unavailable.",
+)
 
-if st.sidebar.button("Reset Game"):
-    st.session_state.board = chess.Board()
-    st.session_state.game_over = False
-    st.session_state.move_history = []
-    st.session_state.analysis_results = None
-    st.session_state.estimated_elo = None
-    st.session_state.selected_square = None
+if st.sidebar.button("Play Another Game"):
+    start_new_game()
+    st.rerun()
+
+if st.sidebar.button("Restart This Game"):
+    st.session_state.games[st.session_state.active_game_index]["moves"].clear()
+    load_game(st.session_state.active_game_index)
+    st.rerun()
+
+game_nav_prev, game_nav_label, game_nav_next = st.sidebar.columns([1, 2, 1])
+game_nav_label.caption(
+    f"Game {st.session_state.active_game_index + 1} of {len(st.session_state.games)}"
+)
+if game_nav_prev.button(
+    "←",
+    key="previous_game",
+    disabled=st.session_state.active_game_index == 0,
+    help="Switch to the previous game",
+):
+    load_game(st.session_state.active_game_index - 1)
+    st.rerun()
+if game_nav_next.button(
+    "→",
+    key="next_game",
+    disabled=st.session_state.active_game_index >= len(st.session_state.games) - 1,
+    help="Switch to the next game",
+):
+    load_game(st.session_state.active_game_index + 1)
     st.rerun()
 
 # --- BOT MOVE LOGIC ---
@@ -60,9 +126,9 @@ def get_bot_move():
     if not legal_moves:
         return None
 
-    if os.path.isfile(STOCKFISH_PATH):
+    if os.path.isfile(stockfish_path):
         try:
-            with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
+            with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
                 engine.configure({"Skill Level": bot_config["skill"]})
                 result = engine.play(
                     st.session_state.board,
@@ -107,15 +173,22 @@ def analyze_game(engine):
 
         move_san = replay_board.san(move)
         if idx % 2 == 0:
-            info_before = engine.analyse(replay_board, chess.engine.Limit(depth=12))
-            score_before = info_before["score"].white().score(mate_score=10000)
-            best_engine_move = info_before.get("pv", [None])[0]
+            if engine is not None:
+                info_before = engine.analyse(replay_board, chess.engine.Limit(depth=12))
+                score_before = info_before["score"].white().score(mate_score=10000)
+                best_engine_move = info_before.get("pv", [None])[0]
+            else:
+                score_before = best_white_score(replay_board)
+                best_engine_move = None
 
         replay_board.push(move)
 
         if idx % 2 == 0:
-            info_after = engine.analyse(replay_board, chess.engine.Limit(depth=12))
-            score_after = info_after["score"].white().score(mate_score=10000)
+            if engine is not None:
+                info_after = engine.analyse(replay_board, chess.engine.Limit(depth=12))
+                score_after = info_after["score"].white().score(mate_score=10000)
+            else:
+                score_after = best_black_reply_score(replay_board)
             score_change = (score_after - score_before) / 100.0
             centipawn_losses.append(max(0, -score_after + score_before))
 
@@ -151,6 +224,49 @@ def analyze_game(engine):
     }
 
 
+def static_white_score(board):
+    if board.is_checkmate():
+        return -100000 if board.turn == chess.WHITE else 100000
+    if board.is_game_over(claim_draw=True):
+        return 0
+
+    piece_values = {
+        chess.PAWN: 100,
+        chess.KNIGHT: 320,
+        chess.BISHOP: 330,
+        chess.ROOK: 500,
+        chess.QUEEN: 900,
+        chess.KING: 0,
+    }
+    return sum(
+        piece_values[piece.piece_type] * (1 if piece.color == chess.WHITE else -1)
+        for piece in board.piece_map().values()
+    )
+
+
+def best_white_score(board):
+    best_score = -float("inf")
+    for move in board.legal_moves:
+        board.push(move)
+        score = best_black_reply_score(board)
+        board.pop()
+        best_score = max(best_score, score)
+    return best_score
+
+
+def best_black_reply_score(board):
+    if board.is_game_over(claim_draw=True):
+        return static_white_score(board)
+
+    best_score = float("inf")
+    for move in board.legal_moves:
+        board.push(move)
+        score = static_white_score(board)
+        board.pop()
+        best_score = min(best_score, score)
+    return best_score
+
+
 # Recover a bot turn left pending by an earlier engine failure.
 if st.session_state.board.turn == chess.BLACK and not st.session_state.board.is_game_over():
     pending_bot_move = get_bot_move()
@@ -159,6 +275,7 @@ if st.session_state.board.turn == chess.BLACK and not st.session_state.board.is_
         st.session_state.board.push(pending_bot_move)
         st.session_state.analysis_results = None
         st.session_state.estimated_elo = None
+        st.session_state.view_ply = len(st.session_state.move_history)
 
 # Check game over status, showing checkmate before the general check notice.
 if st.session_state.board.is_checkmate():
@@ -173,13 +290,56 @@ elif st.session_state.board.is_check():
     checked_side = "White" if st.session_state.board.turn == chess.WHITE else "Black"
     st.warning(f"Check! {checked_side} is in check.")
 
+# Browse the active game's move history. Selecting an earlier move is read-only.
+active_moves = st.session_state.move_history
+move_controls = st.columns([1, 2, 1, 1])
+if move_controls[0].button(
+    "← Previous move",
+    disabled=st.session_state.view_ply <= 0,
+    key="previous_move",
+):
+    st.session_state.view_ply -= 1
+    st.session_state.selected_square = None
+    st.rerun()
+move_controls[1].caption(
+    f"Position {st.session_state.view_ply} of {len(active_moves)} moves"
+)
+if move_controls[2].button(
+    "Next move →",
+    disabled=st.session_state.view_ply >= len(active_moves),
+    key="next_move",
+):
+    st.session_state.view_ply += 1
+    st.session_state.selected_square = None
+    st.rerun()
+
+undo_disabled = not active_moves or st.session_state.view_ply != len(active_moves)
+if move_controls[3].button(
+    "Undo Move",
+    disabled=undo_disabled,
+    key="undo_turn",
+    help="Undo your last move and the bot's reply, returning play to your turn.",
+):
+    last_move_board = chess.Board(active_moves[-1][0])
+    remove_count = 2 if last_move_board.turn == chess.BLACK and len(active_moves) >= 2 else 1
+    del active_moves[-remove_count:]
+    load_game(st.session_state.active_game_index)
+    st.rerun()
+
 # --- MAIN LAYOUT ---
 col1, col2 = st.columns([2, 1])
 
 with col1:
     st.subheader("Interactive Board")
 
-    board = st.session_state.board
+    live_position = st.session_state.view_ply == len(active_moves)
+    board = (
+        st.session_state.board
+        if live_position
+        else board_after_plies(active_moves, st.session_state.view_ply)
+    )
+    if not live_position:
+        st.caption("Viewing a previous position. Use Next move to return to the current game.")
     piece_symbols = {
         chess.Piece(chess.KING, chess.WHITE): "♔",
         chess.Piece(chess.QUEEN, chess.WHITE): "♕",
@@ -218,7 +378,11 @@ with col1:
             else:
                 label = "•" if square in legal_targets else " "
             selected = square == st.session_state.selected_square
-            disabled = st.session_state.game_over or board.turn != chess.WHITE
+            disabled = (
+                not live_position
+                or st.session_state.game_over
+                or board.turn != chess.WHITE
+            )
 
             if squares[file].button(
                 label,
@@ -247,6 +411,7 @@ with col1:
                         )
                         st.session_state.move_history.append((board.fen(), move))
                         board.push(move)
+                        st.session_state.view_ply = len(st.session_state.move_history)
                         st.session_state.analysis_results = None
                         st.session_state.estimated_elo = None
                         st.session_state.selected_square = None
@@ -260,6 +425,7 @@ with col1:
                             else:
                                 st.session_state.move_history.append((board.fen(), bot_move))
                                 board.push(bot_move)
+                                st.session_state.view_ply = len(st.session_state.move_history)
                                 if board.is_game_over():
                                     st.session_state.game_over = True
                         st.rerun()
@@ -301,26 +467,30 @@ estimate_elo_clicked = elo_col.button("Estimate My Elo")
 if analyze_clicked or estimate_elo_clicked:
     if not st.session_state.move_history:
         st.warning("No moves have been played yet!")
-    elif not os.path.isfile(STOCKFISH_PATH):
-        st.error(
-            "Stockfish is required for analysis and an Elo estimate. Set STOCKFISH_PATH "
-            "to the full path of your Stockfish executable."
-        )
     else:
         with st.spinner("Analyzing your moves..."):
             try:
-                with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
-                    st.session_state.analysis_results = analyze_game(engine)
-                    if estimate_elo_clicked:
-                        st.session_state.estimated_elo = st.session_state.analysis_results["estimated_elo"]
+                if os.path.isfile(stockfish_path):
+                    try:
+                        with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
+                            st.session_state.analysis_results = analyze_game(engine)
+                    except (chess.engine.EngineError, OSError) as exc:
+                        st.warning(f"Could not start Stockfish ({exc}); using the built-in evaluator.")
+                        st.session_state.analysis_results = analyze_game(None)
+                else:
+                    st.info("Stockfish not found; using the built-in evaluator for this analysis.")
+                    st.session_state.analysis_results = analyze_game(None)
+
+                if estimate_elo_clicked:
+                    st.session_state.estimated_elo = st.session_state.analysis_results["estimated_elo"]
             except Exception as e:
                 st.error(f"Analysis engine error: {e}")
 
 if st.session_state.estimated_elo is not None:
     st.metric("Estimated Elo (rough)", st.session_state.estimated_elo)
     st.caption(
-        "This is only a rough estimate from your average centipawn loss, not an official rating. "
-        "It becomes more meaningful after several games."
+        "This is a rough estimate, not an official rating. The built-in evaluator is especially "
+        "approximate; an estimate from Stockfish is more useful."
     )
 
 if st.session_state.analysis_results:
