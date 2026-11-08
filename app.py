@@ -505,22 +505,22 @@ if analyze_clicked or estimate_elo_clicked:
         with st.spinner("Searching for Stockfish and analyzing your moves..."):
             engine_path = find_stockfish(stockfish_path)
             if engine_path is None:
-                st.error(
-                    "Could not find Stockfish. Install/download Stockfish, then enter the full "
-                    "path to its .exe in the sidebar. Searched the configured path, PATH, "
-                    "Downloads, and common install folders."
+                st.warning(
+                    "Stockfish was not found. Using the built-in material evaluator; "
+                    "install Stockfish and enter its .exe path in the sidebar for stronger analysis."
                 )
+                st.session_state.analysis_results = analyze_game(None)
             else:
                 try:
                     with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
                         st.session_state.analysis_results = analyze_game(engine)
                     st.caption(f"Analysis engine: {engine_path}")
-                    if estimate_elo_clicked:
-                        st.session_state.estimated_elo = st.session_state.analysis_results["estimated_elo"]
                 except (chess.engine.EngineError, OSError) as exc:
                     st.error(f"Found Stockfish at {engine_path}, but it could not start: {exc}")
                 except Exception as exc:
                     st.error(f"Analysis engine error: {exc}")
+            if st.session_state.analysis_results and estimate_elo_clicked:
+                st.session_state.estimated_elo = st.session_state.analysis_results["estimated_elo"]
 
 if st.session_state.estimated_elo is not None:
     st.metric("Estimated Elo (rough)", st.session_state.estimated_elo)
