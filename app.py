@@ -14,7 +14,11 @@ st.title("♟️ Streamlit Interactive Chess Bot & Analyzer")
 STOCKFISH_PATH = (
     os.getenv("STOCKFISH_PATH")
     or shutil.which("stockfish")
-    or r"C:\Users\mehdi\Downloads\stockfish-windows-x86-64-universal\stockfish\stockfish-windows-x86-64-universal.exe"
+    or (
+        r"C:\Users\mehdi\Downloads\stockfish-windows-x86-64-universal\stockfish\stockfish-windows-x86-64-universal.exe"
+        if os.name == "nt"
+        else "/usr/games/stockfish"
+    )
 )
 
 
@@ -25,6 +29,9 @@ def find_stockfish(configured_path=""):
         shutil.which("stockfish") or "",
         shutil.which("stockfish.exe") or "",
         STOCKFISH_PATH,
+        "/usr/games/stockfish",
+        "/usr/bin/stockfish",
+        "/usr/local/bin/stockfish",
     ]
 
     for candidate in candidate_paths:
@@ -33,7 +40,7 @@ def find_stockfish(configured_path=""):
         if candidate and os.path.isdir(candidate):
             for root, _, files in os.walk(candidate):
                 for filename in files:
-                    if filename.lower().startswith("stockfish") and filename.lower().endswith(".exe"):
+                    if filename.lower().startswith("stockfish"):
                         return os.path.join(root, filename)
 
     search_roots = [
@@ -47,7 +54,7 @@ def find_stockfish(configured_path=""):
             continue
         for root, _, files in os.walk(search_root):
             for filename in files:
-                if filename.lower().startswith("stockfish") and filename.lower().endswith(".exe"):
+                if filename.lower().startswith("stockfish"):
                     return os.path.join(root, filename)
 
     return None
